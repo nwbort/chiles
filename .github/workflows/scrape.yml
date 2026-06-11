@@ -1,0 +1,36 @@
+name: Scrape Adrian Chiles articles
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"  # every Monday at 06:00 UTC
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run scraper
+        env:
+          GUARDIAN_API_KEY: ${{ secrets.GUARDIAN_API_KEY }}
+        run: |
+          if [ -n "$GUARDIAN_API_KEY" ]; then
+            python scrape.py --api-key "$GUARDIAN_API_KEY" --output titles.txt
+          else
+            python scrape.py --output titles.txt
+          fi
+
+      - name: Upload titles
+        uses: actions/upload-artifact@v4
+        with:
+          name: adrian-chiles-titles
+          path: titles.txt
+          retention-days: 90
