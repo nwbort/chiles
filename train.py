@@ -9,6 +9,7 @@ No external dependencies required — pure Python autograd engine.
 
 import argparse
 import math
+import os
 import pickle
 import random
 import sys
@@ -23,28 +24,59 @@ parser.add_argument("--block-size", type=int, default=20)
 parser.add_argument("--n-generate", type=int, default=40)
 parser.add_argument("--temperature", type=float, default=0.8)
 parser.add_argument("--seed", type=int, default=42)
+parser.add_argument("--checkpoint-interval", type=int, default=25)
 args = parser.parse_args()
 
 random.seed(args.seed)
 
-n_layer = args.n_layer
-n_embd = args.n_embd
-block_size = args.block_size
-n_head = 4
-head_dim = n_embd // n_head
-num_steps = args.steps
+checkpoint_interval = args.checkpoint_interval
+
+# ---------------------------------------------------------------------------
+# Load checkpoint if available
+# ---------------------------------------------------------------------------
+checkpoint_data = None
+start_step = 0
+if os.path.exists("model.pkl"):
+    with open("model.pkl", "rb") as f:
+        checkpoint_data = pickle.load(f)
+    if "step" not in checkpoint_data:
+        # Old checkpoint format without optimizer state — can't resume
+        checkpoint_data = None
+
+if checkpoint_data:
+    uwords = checkpoint_data["uwords"]
+    cfg = checkpoint_data["config"]
+    n_layer = cfg["n_layer"]
+    n_embd = cfg["n_embd"]
+    block_size = cfg["block_size"]
+    n_head = cfg["n_head"]
+    head_dim = cfg["head_dim"]
+    vocab_size = checkpoint_data["vocab_size"]
+    start_step = checkpoint_data["step"]
+    print(f"Resuming from step {start_step}")
+else:
+    n_layer = args.n_layer
+    n_embd = args.n_embd
+    block_size = args.block_size
+    n_head = 4
+    head_dim = n_embd // n_head
 
 # ---------------------------------------------------------------------------
 # Data
 # ---------------------------------------------------------------------------
-docs = [line.strip() for line in open("titles.txt") if line.strip()]
+all_docs = [line.strip() for line in open("titles.txt") if line.strip()]
+
+if checkpoint_data is None:
+    uwords = sorted(set(w for doc in all_docs for w in doc.split()))
+    vocab_size = len(uwords) + 1
+
+word2idx = {w: i for i, w in enumerate(uwords)}
+BOS = len(uwords)
+
+# When resuming, new titles may contain words not in the saved vocabulary — skip them.
+docs = [d for d in all_docs if all(w in word2idx for w in d.split())]
 random.shuffle(docs)
 print(f"num docs: {len(docs)}")
-
-uwords = sorted(set(w for doc in docs for w in doc.split()))
-word2idx = {w: i for i, w in enumerate(uwords)}
-BOS = len(uwords)   # beginning / end of sequence token
-vocab_size = len(uwords) + 1
 print(f"vocab size: {vocab_size} words")
 
 # ---------------------------------------------------------------------------
@@ -125,6 +157,13 @@ for i in range(n_layer):
 params = [p for mat in state_dict.values() for row in mat for p in row]
 print(f"num params: {len(params)}")
 
+# Restore weights from checkpoint
+if checkpoint_data:
+    for k, mat in state_dict.items():
+        for i, row in enumerate(mat):
+            for j, p in enumerate(row):
+                p.data = checkpoint_data["state_dict"][k][i][j]
+
 
 def linear(x, w):
     return [sum(wi * xi for wi, xi in zip(wo, x)) for wo in w]
@@ -188,16 +227,46 @@ def gpt(token_id, pos_id, keys, values):
     return linear(x, state_dict["lm_head"])
 
 # ---------------------------------------------------------------------------
-# Training  (from karpathy/microgpt, unchanged)
+# Training
 # ---------------------------------------------------------------------------
 lr = 0.01
 beta1, beta2, eps_adam = 0.85, 0.99, 1e-8
-m_adam = [0.0] * len(params)
-v_adam = [0.0] * len(params)
 
-print(f"training {num_steps} steps...")
-for step in range(num_steps):
-    doc = docs[step % len(docs)]
+if checkpoint_data:
+    m_adam = checkpoint_data["m_adam"]
+    v_adam = checkpoint_data["v_adam"]
+else:
+    m_adam = [0.0] * len(params)
+    v_adam = [0.0] * len(params)
+
+num_steps = args.steps
+print(f"training {num_steps} steps from step {start_step}...")
+
+
+def save_checkpoint(step):
+    ckpt = {
+        "step": step,
+        "state_dict": {k: [[p.data for p in row] for row in mat] for k, mat in state_dict.items()},
+        "m_adam": m_adam,
+        "v_adam": v_adam,
+        "uwords": uwords,
+        "vocab_size": vocab_size,
+        "config": {
+            "n_layer": n_layer,
+            "n_embd": n_embd,
+            "block_size": block_size,
+            "n_head": n_head,
+            "head_dim": head_dim,
+        },
+    }
+    with open("model.pkl", "wb") as f:
+        pickle.dump(ckpt, f)
+    print(f"  [checkpoint saved at step {step}]", flush=True)
+
+
+for local_step in range(num_steps):
+    global_step = start_step + local_step
+    doc = docs[global_step % len(docs)]
     tokens = [BOS] + [word2idx[w] for w in doc.split()] + [BOS]
     n = min(block_size, len(tokens) - 1)
 
@@ -214,38 +283,27 @@ for step in range(num_steps):
     loss = sum(losses) * (1 / n)
     loss.backward()
 
-    lr_t = lr * (1 - step / num_steps)
+    lr_t = lr * (1 - local_step / num_steps)
     for i, p in enumerate(params):
         m_adam[i] = beta1 * m_adam[i] + (1 - beta1) * p.grad
         v_adam[i] = beta2 * v_adam[i] + (1 - beta2) * p.grad ** 2
-        m_hat = m_adam[i] / (1 - beta1 ** (step + 1))
-        v_hat = v_adam[i] / (1 - beta2 ** (step + 1))
+        # Use global_step for Adam bias correction so momentum carries across runs
+        m_hat = m_adam[i] / (1 - beta1 ** (global_step + 1))
+        v_hat = v_adam[i] / (1 - beta2 ** (global_step + 1))
         p.data -= lr_t * m_hat / (v_hat ** 0.5 + eps_adam)
         p.grad = 0
 
-    if (step + 1) % 50 == 0 or step == 0:
-        print(f"step {step+1:4d}/{num_steps} | loss {loss.data:.4f}", flush=True)
+    if (local_step + 1) % 50 == 0 or local_step == 0:
+        print(f"step {global_step+1:4d} | loss {loss.data:.4f}", flush=True)
+
+    if (local_step + 1) % checkpoint_interval == 0:
+        save_checkpoint(global_step + 1)
 
 print()
 
-# ---------------------------------------------------------------------------
-# Save checkpoint
-# ---------------------------------------------------------------------------
-checkpoint = {
-    "state_dict": {k: [[p.data for p in row] for row in mat] for k, mat in state_dict.items()},
-    "uwords": uwords,
-    "vocab_size": vocab_size,
-    "config": {
-        "n_layer": n_layer,
-        "n_embd": n_embd,
-        "block_size": block_size,
-        "n_head": n_head,
-        "head_dim": head_dim,
-    },
-}
-with open("model.pkl", "wb") as f:
-    pickle.dump(checkpoint, f)
-print("saved model.pkl")
+# Save final checkpoint if the last block didn't land on the interval boundary
+if num_steps % checkpoint_interval != 0:
+    save_checkpoint(start_step + num_steps)
 
 # ---------------------------------------------------------------------------
 # Generate titles
