@@ -24,7 +24,7 @@ jobs:
           python-version: "3.12"
 
       - name: Train model and generate titles
-        run: python train.py
+        run: python train.py --steps 25
 
       - name: Commit results
         run: |
