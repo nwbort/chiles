@@ -1,11 +1,7 @@
 name: Train Chiles title generator
 
-# Requires a GPU runner with 8+ GB VRAM.
-# Options:
-#   - Self-hosted: add a runner with label "gpu" and set runs-on below
-#   - GitHub-hosted GPU runners (paid): change runs-on to e.g. "ubuntu-latest-gpu"
-# Also requires a HuggingFace token (HF_TOKEN secret) with access to
-# google/gemma-2-2b-it (accept the licence at hf.co/google/gemma-2-2b-it first).
+# Pure-Python microgpt — no GPU or external ML libraries required.
+# Runs on free ubuntu-latest GitHub-hosted runners.
 
 on:
   workflow_dispatch:
@@ -17,8 +13,8 @@ permissions:
 
 jobs:
   train:
-    runs-on: [self-hosted, gpu]
-    timeout-minutes: 120
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -27,20 +23,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install torch transformers peft trl datasets accelerate
-
       - name: Train model and generate titles
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python train.py
 
       - name: Commit results
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add generated.txt
+          git add generated.txt model.pkl
           git diff --staged --quiet || git commit -m "chore: regenerate titles [skip ci]"
           git push
