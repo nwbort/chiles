@@ -20,19 +20,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install scraper dependency
-        run: pip install requests
-
-      - name: Scrape fresh titles
-        run: |
-          if [ -n "$GUARDIAN_API_KEY" ]; then
-            python scrape.py --api-key "$GUARDIAN_API_KEY" --output titles.txt
-          else
-            python scrape.py --output titles.txt
-          fi
-        env:
-          GUARDIAN_API_KEY: ${{ secrets.GUARDIAN_API_KEY }}
-
       - name: Train model and generate titles
         run: python train.py
 
@@ -40,6 +27,6 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add titles.txt model.pkl generated.txt
+          git add model.pkl generated.txt
           git diff --staged --quiet || git commit -m "chore: retrain model and regenerate titles [skip ci]"
           git push
