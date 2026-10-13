@@ -78,6 +78,9 @@ def main() -> None:
         print(f"HTTP error: {e}", file=sys.stderr)
         sys.exit(1)
 
+    # Liveblogs carry his byline but aren't his columns
+    articles = [a for a in articles if a.get("type") != "liveblog"]
+
     titles = [a.get("fields", {}).get("headline") or a["webTitle"] for a in articles]
 
     print(f"\n{len(titles)} articles total:\n")
